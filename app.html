@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Risk-Aware Ambulance Routing – Tirana test case</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--tx:#1b1f24;--mut:#667085;--bd:#e3e6ea;--ac:#1a7f4b;--bad:#c62828}
+@media(prefers-color-scheme:dark){:root{--bg:#14171a;--panel:#1d2126;--tx:#e8eaed;--mut:#9aa3ad;--bd:#2e343b;--ac:#4cc38a;--bad:#ef6a6a}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--tx);display:flex}
+#side{width:360px;max-width:42vw;overflow:auto;padding:14px;background:var(--panel);border-right:1px solid var(--bd);height:100vh}
+#map{flex:1;height:100vh;min-height:420px}
+@media(max-width:760px){body{flex-direction:column-reverse}#side{width:100%;max-width:none;height:52%}#map{height:48%;min-height:240px}}
+h1{font-size:16px;margin:0 0 2px}.sub{color:var(--mut);font-size:12px;margin-bottom:10px}
+button{font:inherit;padding:7px 10px;margin:0 6px 6px 0;border:1px solid var(--bd);background:var(--bg);color:var(--tx);border-radius:8px;cursor:pointer}
+button.pri{background:var(--ac);color:#fff;border-color:var(--ac)}button.on{outline:2px solid var(--ac)}
+.card{border:1px solid var(--bd);border-radius:10px;padding:10px;margin:8px 0}
+.row{display:flex;justify-content:space-between;gap:8px;padding:2px 0}.row b{font-variant-numeric:tabular-nums}
+.bad{color:var(--bad)}.ok{color:var(--ac)}label{display:block;font-size:12px;color:var(--mut);margin-top:6px}
+input[type=range]{width:100%}#log{font:12px ui-monospace,monospace;color:var(--mut);max-height:180px;overflow:auto;white-space:pre-wrap}
+.pin{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-weight:700;color:#fff;border:2px solid #fff;box-shadow:0 1px 4px #0006}
+.pin.s{background:#1565c0}.pin.e{background:#6a1b9a}.pin.b{background:#c62828}.pin.h{background:#2e7d32}
+</style></head><body>
+<div id="side">
+  <h1>Risk-Aware Ambulance Routing</h1>
+  <div class="sub">Test case: hospital → patient in central Kyiv, Ukraine while multiple road danger zones close key corridors. Illustrative but realistic urban emergency routing scenario; positions are approximate and draggable.</div>
+  <button class="pri" id="bLoad">Load Kyiv emergency case</button>
+  <button id="bLoadBlocks">Load blockades from file</button>
+  <button id="bSim">Simulate blockades A/B/C</button>
+  <button id="bAdd">Add blockade (click map)</button>
+  <button id="bClear">Clear blockades</button>
+  <button id="bHosp">Find hospital (search)</button>
+  <button id="bNearestHosp">Use nearest real hospital</button>
+  <label>Risk weight α: <span id="av">3</span> (higher = avoid protest areas more)</label>
+  <input id="alpha" type="range" min="0" max="10" step="0.5" value="3">
+  <label>Blockade radius: <span id="rv">150</span> m</label>
+  <input id="rad" type="range" min="50" max="500" step="10" value="150">
+  <label>Time (minutes): <span id="tv">0</span></label>
+  <input id="time" type="range" min="0" max="120" step="1" value="0">
+  <div class="card" id="res"><div class="sub">Press “Load Tirana test case”.</div></div>
+  <div class="card" id="wx"><div class="sub">Weather: –</div></div>
+  <div class="card"><b>Agent log</b><div id="log"></div></div>
+  <div class="sub">Live data: OpenStreetMap tiles/Nominatim, OSRM routing, Open-Meteo weather. Needs internet; open this file locally in a browser.</div>
+</div>
+<div id="map"></div>
+<script>
+const $=id=>document.getElementById(id);
+const map=L.map('map').setView([41.3275,19.8187],14);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(map);
+const S={start:[50.4392,30.5200],end:[50.4687,30.5038],blocks:[],baseline:null,token:0,adding:false,timeMinutes:0};
+const icon=(t,c)=>L.divIcon({className:'',html:`<div class="pin ${c}">${t}</div>`,iconSize:[30,30],iconAnchor:[15,15]});
+const mk=(ll,t,c,cb)=>{const m=L.marker(ll,{draggable:true,icon:icon(t,c)}).addTo(map);m.on('dragend',()=>cb(m.getLatLng()));return m};
+const mS=mk(S.start,'H','s',p=>{S.start=[p.lat,p.lng];stopAnimation();ambulance.setLatLng(S.start);full()});
+const mE=mk(S.end,'P','e',p=>{S.end=[p.lat,p.lng];full()});
+const gBase=L.layerGroup().addTo(map),gNew=L.layerGroup().addTo(map),gHosp=L.layerGroup().addTo(map);
+const ambulance=L.marker(S.start,{icon:icon('A','s')}).addTo(map);
+const sim={active:false,raf:0};
+const log=m=>{const t=new Date().toLocaleTimeString();$('log').textContent=`${t}  ${m}\n`+$('log').textContent};
+
+function haversine(a,b){const R=6371000;const toRad=x=>x*Math.PI/180;const dLat=toRad(b[0]-a[0]);const dLng=toRad(b[1]-a[1]);const lat1=toRad(a[0]),lat2=toRad(b[0]);const h=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)*Math.sin(dLng/2);return 2*R*Math.atan2(Math.sqrt(h),Math.sqrt(1-h));}
+function stopAnimation(){if(sim.raf)cancelAnimationFrame(sim.raf);sim.raf=0;sim.active=false}
+function syncAmbulance(){ambulance.setLatLng(S.start);stopAnimation();}
+function isBlockadeActive(b){const start=Number(b.start_minute ?? 0);const end=Number(b.end_minute ?? 999);return S.timeMinutes>=start && S.timeMinutes<=end;}
+function refreshBlockadeStyles(){S.blocks.forEach(b=>{const active=isBlockadeActive(b);b.circle.setStyle({color:active?'#c62828':'#7a7a7a',fillColor:active?'#c62828':'#7a7a7a',fillOpacity:active?0.25:0.08,opacity:active?1:0.5});b.m.setOpacity(active?1:0.45);});}
+function animateRoute(coords){
+  if(!coords||coords.length<2)return;
+  stopAnimation();
+  sim.active=true;
+  const totalMs=Math.max(6000,coords.length*1300);
+  const start=performance.now();
+  function tick(now){
+    const p=Math.min((now-start)/totalMs,1);
+    const scaled=p*(coords.length-1);
+    const i=Math.min(Math.floor(scaled),coords.length-2);
+    const t=scaled-i;
+    const a=coords[i],b=coords[i+1];
+    const lat=a[0]+(b[0]-a[0])*t;
+    const lng=a[1]+(b[1]-a[1])*t;
+    ambulance.setLatLng([lat,lng]);
+    if(p<1) sim.raf=requestAnimationFrame(tick); else sim.active=false;
+  }
+  sim.raf=requestAnimationFrame(tick);
+}
+
+/* ---------- geometry (meters, local equirectangular) ---------- */
+const proj=(p,o)=>[(p[1]-o[1])*Math.cos(o[0]*Math.PI/180)*111320,(p[0]-o[0])*110540];
+const dm=(a,b)=>{const p=proj(b,a);return Math.hypot(p[0],p[1])};
+function dseg(a,b){const dx=b[0]-a[0],dy=b[1]-a[1],l=dx*dx+dy*dy;let t=l?(-a[0]*dx-a[1]*dy)/l:0;t=Math.max(0,Math.min(1,t));return Math.hypot(a[0]+t*dx,a[1]+t*dy)}
+function minDist(coords,c){let m=1e9,prev=proj(coords[0],c);for(let i=1;i<coords.length;i++){const cur=proj(coords[i],c);m=Math.min(m,dseg(prev,cur));prev=cur}return m}
+const hitsOf=r=>S.blocks.filter(b=>isBlockadeActive(b)).map((b,i)=>{const idx=S.blocks.indexOf(b);return minDist(r.coords,b.ll)<=b.r?idx:-1;}).filter(i=>i>=0);
+function riskFrac(coords){let tot=0,nr=0;for(let i=1;i<coords.length;i++){const l=dm(coords[i-1],coords[i]);tot+=l;const m=[(coords[i][0]+coords[i-1][0])/2,(coords[i][1]+coords[i-1][1])/2];if(S.blocks.filter(b=>isBlockadeActive(b)).some(b=>dm(b.ll,m)<2.5*b.r))nr+=l}return tot?nr/tot:0}
+const ring=(b,k)=>{const a=k*Math.PI/4,d=b.r*2.4;return [b.ll[0]+d*Math.cos(a)/110540,b.ll[1]+d*Math.sin(a)/(111320*Math.cos(b.ll[0]*Math.PI/180))]};
+
+/* ---------- API: OSRM routing ---------- */
+async function osrm(pts){
+  const c=pts.map(p=>p[1]+','+p[0]).join(';');
+  try{const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${c}?alternatives=3&geometries=geojson&overview=full`);
+    const j=await r.json();if(j.code!=='Ok')return [];
+    return j.routes.map(x=>({coords:x.geometry.coordinates.map(q=>[q[1],q[0]]),dur:x.duration,dist:x.distance}));
+  }catch(e){log('Routing API error: '+e.message);return []}
+}
+
+/* ---------- the planning agent ---------- */
+async function plan(startPoint=S.start){
+  const alpha=+$('alpha').value,pool=[],seen=new Set();
+  const add=(wps,rts)=>rts.forEach(r=>{const k=Math.round(r.dur)+'-'+Math.round(r.dist);if(seen.has(k))return;seen.add(k);
+    pool.push({wps,r,hits:hitsOf(r),risk:riskFrac(r.coords)})});
+  add([],await osrm([startPoint,S.end]));
+  for(let round=0;round<2&&pool.length;round++){
+    if(pool.some(p=>!p.hits.length))break;
+    const best=pool.reduce((a,b)=>a.hits.length<=b.hits.length?a:b);
+    const jobs=[];
+    best.hits.forEach(i=>{for(let k=0;k<8;k++)jobs.push(best.wps.concat([ring(S.blocks[i],k)]).sort((a,b)=>dm(startPoint,a)-dm(startPoint,b)))});
+    log(`Round ${round+1}: ${best.hits.length} blocked → trying ${jobs.length} detour waypoints`);
+    for(let i=0;i<jobs.length;i+=4){
+      const res=await Promise.all(jobs.slice(i,i+4).map(w=>osrm([startPoint,...w,S.end])));
+      res.forEach((rts,j)=>add(jobs[i+j],rts));
+    }
+  }
+  const clear=pool.filter(p=>!p.hits.length).map(p=>({...p,cost:p.r.dur*(1+alpha*p.risk)})).sort((a,b)=>a.cost-b.cost);
+  return {best:clear[0]||null,n:pool.length,pool};
+}
+
+/* ---------- UI flow ---------- */
+const line=(g,coords,o)=>L.polyline(coords,o).addTo(g);
+const mins=s=>(s/60).toFixed(1)+' min';
+async function full(){S.baseline=null;gBase.clearLayers();gNew.clearLayers();
+  syncAmbulance();
+  const r=await osrm([S.start,S.end]);if(!r.length){$('res').innerHTML='<div class="bad">Could not get a route.</div>';return}
+  S.baseline=r[0];log(`Baseline (normal shortest path): ${mins(r[0].dur)}, ${(r[0].dist/1000).toFixed(1)} km`);
+  map.fitBounds(L.latLngBounds(r[0].coords),{padding:[40,40]});return replan();}
+async function replan(){
+  if(!S.baseline)return null;const tk=++S.token;gBase.clearLayers();gNew.clearLayers();refreshBlockadeStyles();
+  const activeBlocks=S.blocks.filter(b=>isBlockadeActive(b));
+  const bh=hitsOf(S.baseline),L_=bh.map(i=>S.blocks[i].name);
+  line(gBase,S.baseline.coords,{color:bh.length?'#c62828':'#1565c0',weight:5,opacity:.7,dashArray:bh.length?'8 8':null});
+  if(!activeBlocks.length){render(S.baseline,null,[],0);return null}
+  log(activeBlocks.length+' blockade(s) active – replanning…');
+  const out=await plan();if(tk!==S.token)return null;
+  if(out.best){
+    line(gNew,out.best.r.coords,{color:'#1a7f4b',weight:6});
+    if(!sim.active) animateRoute(out.best.r.coords);
+    log(`New route: ${mins(out.best.r.dur)} (+${((out.best.r.dur-S.baseline.dur)/60).toFixed(1)} min), ${out.n} candidates checked`);
+  } else log('No clear route found among '+out.n+' candidates.');
+  render(S.baseline,out.best,L_,out.n);
+  return out;
+}
+async function replanFromVehicle(){
+  const current=[ambulance.getLatLng().lat,ambulance.getLatLng().lng];
+  const out=await plan(current);
+  if(!out.best)return null;
+  gNew.clearLayers();
+  line(gNew,out.best.r.coords,{color:'#1a7f4b',weight:6});
+  animateRoute(out.best.r.coords);
+  log(`Live reroute from current position: ${mins(out.best.r.dur)} to patient`);
+  return out;
+}
+function render(b,n,blocked,cnt){
+  let h=`<div class="row"><span>Normal route</span><b>${mins(b.dur)}</b></div>`;
+  h+=`<div class="row"><span>Status</span><b class="${blocked.length?'bad':'ok'}">${blocked.length?'BLOCKED at '+blocked.join(', '):'clear'}</b></div>`;
+  if(blocked.length){
+    if(n){h+=`<div class="row"><span>Rerouted ETA</span><b class="ok">${mins(n.r.dur)}</b></div>
+      <div class="row"><span>Extra time</span><b>+${((n.r.dur-b.dur)/60).toFixed(1)} min</b></div>
+      <div class="row"><span>Distance</span><b>${(n.r.dist/1000).toFixed(1)} km</b></div>
+      <div class="row"><span>Risk score (route near protests)</span><b>${(n.risk*100).toFixed(0)}%</b></div>
+      <div class="row"><span>Candidates checked</span><b>${cnt}</b></div>`}
+    else h+=`<div class="bad">No safe route found. Try a smaller radius or move a blockade.</div>`}
+  $('res').innerHTML=h}
+function addBlock(ll,meta={}){const name=meta.name || ('ABCDEFGH'[S.blocks.length]||'X'+S.blocks.length);const r=Number(meta.radius ?? +$('rad').value);const start=Number(meta.start_minute ?? 0);const end=Number(meta.end_minute ?? 999);const b={ll,name,r,start_minute:start,end_minute:end};
+  b.circle=L.circle(ll,{radius:b.r,color:'#c62828',fillOpacity:.25}).addTo(map);
+  b.m=L.marker(ll,{draggable:true,icon:icon(name,'b')}).addTo(map);
+  b.m.bindTooltip(name,{permanent:false,direction:'top'});
+  b.m.on('dragend',()=>{const p=b.m.getLatLng();b.ll=[p.lat,p.lng];b.circle.setLatLng(p);log(`Blockade ${name} moved`);if(sim.active){replanFromVehicle()}else{replan()}});
+  refreshBlockadeStyles();
+  S.blocks.push(b)}
+function clearBlocks(){S.blocks.forEach(b=>{map.removeLayer(b.circle);map.removeLayer(b.m)});S.blocks=[];if(sim.active){replanFromVehicle()}else{replan()}}
+function clearHospitalMarkers(){gHosp.clearLayers();}
+function drawHospitalMarkers(items){clearHospitalMarkers();items.forEach(h=>{const mark=L.marker([h.lat,h.lng]).addTo(gHosp);mark.bindTooltip(h.name || 'Hospital',{direction:'top'});mark.setIcon(L.divIcon({className:'',html:`<div class="pin h">H</div>`,iconSize:[20,20],iconAnchor:[10,10]}));});}
+async function loadBlockadesFromFile(){
+  try{
+    const r=await fetch('blockades.json');
+    if(!r.ok){throw new Error('Could not load blockades.json');}
+    const data=await r.json();
+    clearBlocks();
+    data.forEach(item=>addBlock([Number(item.lat),Number(item.lng)],{name:item.name,radius:Number(item.radius),start_minute:item.start_minute,end_minute:item.end_minute}));
+    refreshBlockadeStyles();
+    log(`Loaded ${data.length} blockade(s) from file`);
+    if(sim.active){replanFromVehicle()}else{replan()}
+  }catch(e){log('Open the app with Live Server (http://127.0.0.1:5500), not by double-clicking the file.');}
+}
+async function simulate(){
+  if(!S.baseline)return;
+  clearBlocks();
+  const c=S.baseline.coords;
+  [.12,.25,.38,.52,.67,.81].forEach(f=>addBlock(c[Math.floor(c.length*f)]));
+  log('Kyiv danger zones A–F placed on the normal route');
+  await replan();
+}
+
+$('bLoad').onclick=async()=>{S.start=[50.4392,30.5200];S.end=[50.4687,30.5038];mS.setLatLng(S.start);mE.setLatLng(S.end);syncAmbulance();clearBlocks();
+  log('Test case: ambulance from hospital to patient, central Kyiv');await full();await simulate();weather()};
+$('bLoadBlocks').onclick=loadBlockadesFromFile;
+$('bSim').onclick=simulate;$('bClear').onclick=()=>{clearBlocks();log('Blockades cleared')};
+$('bAdd').onclick=()=>{S.adding=!S.adding;$('bAdd').classList.toggle('on',S.adding)};
+map.on('click',e=>{if(!S.adding)return;addBlock([e.latlng.lat,e.latlng.lng]);log('Blockade '+S.blocks.at(-1).name+' added');if(sim.active){replanFromVehicle()}else{replan()}});
+$('alpha').oninput=e=>{$('av').textContent=e.target.value;replan()};
+$('rad').oninput=e=>{$('rv').textContent=e.target.value;S.blocks.forEach(b=>{b.r=+e.target.value;b.circle.setRadius(b.r)});if(sim.active){replanFromVehicle()}else{replan()}};
+$('time').oninput=e=>{$('tv').textContent=e.target.value;S.timeMinutes=Number(e.target.value);refreshBlockadeStyles();if(S.baseline){if(sim.active){replanFromVehicle()}else{replan()}}};
+$('bHosp').onclick=async()=>{try{const q='Shalimov National Scientific Center of Surgery, Kyiv';
+  const j=await (await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(q))).json();
+  if(!j[0]){log('Hospital not found');return}S.start=[+j[0].lat,+j[0].lon];mS.setLatLng(S.start);syncAmbulance();log('Hospital found: '+j[0].display_name.slice(0,60));full()}catch(e){log('Search error: '+e.message)}};
+$('bNearestHosp').onclick=async()=>{try{const q=`[out:json][timeout:30];(node["amenity"="hospital"](around:5000,${S.end[0]},${S.end[1]});way["amenity"="hospital"](around:5000,${S.end[0]},${S.end[1]}););out center;`;const url='https://overpass-api.de/api/interpreter?data='+encodeURIComponent(q);const j=await (await fetch(url)).json();const items=(j.elements||[]).map(el=>{const lat=el.lat ?? (el.center&&el.center.lat);const lng=el.lon ?? (el.center&&el.center.lon);if(!lat || !lng)return null;const name=(el.tags&& (el.tags.name || el.tags['name:en'])) || 'Hospital';return {lat, lng, name, dist:haversine([S.end[0],S.end[1]],[lat,lng])};}).filter(Boolean).sort((a,b)=>a.dist-b.dist);drawHospitalMarkers(items);if(!items.length){log('No hospitals found near patient');return;}const nearest=items[0];S.start=[nearest.lat,nearest.lng];mS.setLatLng(S.start);syncAmbulance();log('Nearest live hospital: '+nearest.name+' ('+(nearest.dist/1000).toFixed(1)+' km)');await full();if(S.blocks.length) await replan();weather()}catch(e){log('Hospital lookup error: '+e.message)}};
+async function weather(){try{const j=await (await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${S.start[0]}&longitude=${S.start[1]}&current=temperature_2m,precipitation,wind_speed_10m`)).json();
+  const c=j.current;$('wx').innerHTML=`<b>Weather at hospital</b><div class="row"><span>Temperature</span><b>${c.temperature_2m}°C</b></div><div class="row"><span>Rain</span><b>${c.precipitation} mm</b></div><div class="row"><span>Wind</span><b>${c.wind_speed_10m} km/h</b></div>`}catch(e){log('Weather error')}}
+</script></body></html>

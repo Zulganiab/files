@@ -1,0 +1,50 @@
+[
+  {
+    "name": "A - Khreshchatyk corridor",
+    "lat": 50.4493,
+    "lng": 30.5246,
+    "radius": 170,
+    "start_minute": 0,
+    "end_minute": 9
+  },
+  {
+    "name": "B - Velyka Vasylkivska junction",
+    "lat": 50.4521,
+    "lng": 30.5159,
+    "radius": 180,
+    "start_minute": 2,
+    "end_minute": 11
+  },
+  {
+    "name": "C - Dnipro embankment",
+    "lat": 50.4562,
+    "lng": 30.5104,
+    "radius": 190,
+    "start_minute": 4,
+    "end_minute": 13
+  },
+  {
+    "name": "D - Instytutska / Hrushevsky",
+    "lat": 50.4601,
+    "lng": 30.5020,
+    "radius": 170,
+    "start_minute": 6,
+    "end_minute": 16
+  },
+  {
+    "name": "E - Bankova district",
+    "lat": 50.4449,
+    "lng": 30.5262,
+    "radius": 160,
+    "start_minute": 5,
+    "end_minute": 14
+  },
+  {
+    "name": "F - Pechersk transit route",
+    "lat": 50.4348,
+    "lng": 30.5302,
+    "radius": 180,
+    "start_minute": 7,
+    "end_minute": 18
+  }
+]
